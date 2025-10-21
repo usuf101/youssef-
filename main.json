@@ -1,0 +1,9 @@
+{
+  "scenes": [
+    {
+      "id": "main",
+      "file": "deploy/cpe project.bin"
+    }
+  ],
+  "startScene": "main"
+}

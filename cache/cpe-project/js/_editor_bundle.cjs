@@ -1,3 +1,4 @@
+"use strict";
 (() => {
   var __create = Object.create;
   var __defProp = Object.defineProperty;
@@ -9502,6 +9503,24 @@
     property.float(0.9)
   ], OrbitalCamera.prototype, "damping", void 0);
 
+  // js/.js
+  var __exports = {};
+  __export(__exports, {
+    MyComponent: () => MyComponent
+  });
+  var MyComponent = class extends Component3 {
+    start() {
+      console.log("start() with param", this.param);
+    }
+    update(dt) {
+    }
+  };
+  __publicField(MyComponent, "TypeName", "my-component");
+  /* Properties that are configurable in the editor */
+  __publicField(MyComponent, "Properties", {
+    param: Property.float(1)
+  });
+
   // js/button.js
   var button_exports = {};
   __export(button_exports, {
@@ -9588,5 +9607,6 @@
 
   // cache/cpe-project/js/_editor_index.js
   _registerEditor(dist_exports);
+  _registerEditor(__exports);
   _registerEditor(button_exports);
 })();
