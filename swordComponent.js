@@ -1,45 +1,72 @@
-// Component for Sword
+// Final VR Sword Component for Fruit Ninja with VR Hand Support
 import { Component, Property } from '@wonderlandengine/api';
 import { vec3 } from 'gl-matrix';
 
-/**
- * VR Sword Component - Detects slicing motion and triggers cuts
- * Attach this to your VR controller or sword object
- */
 export class VRSword extends Component {
     static TypeName = 'vr-sword';
     
     static Properties = {
-        // Minimum speed required to register a slice (units per second)
-        minSliceSpeed: Property.float(2.0),
+        // Detection radius for hitting fruits
+        hitRadius: Property.float(0.2),
         
-        // How many positions to track for the blade trail
-        trailLength: Property.int(3),
-        
-        // Maximum distance to detect sliceable objects
-        sliceRadius: Property.float(0.5),
-        
-        // Optional visual blade trail object
-        bladeTrail: Property.object(),
+        // Minimum speed required to register a hit (set to 0 to disable)
+        minHitSpeed: Property.float(0.3),
         
         // Debug visualization
-        showDebug: Property.bool(false)
+        showDebug: Property.bool(false),
+        
+        // Hand tracking mode: 'none', 'left', or 'right'
+        handTracking: Property.enum(['none', 'left', 'right'], 'right'),
+        
+        // Check for hits even when not moving fast (useful for testing)
+        alwaysCheckHits: Property.bool(false)
     };
 
     init() {
-        this.positions = [];
         this.lastPos = vec3.create();
         this.currentPos = vec3.create();
         this.velocity = vec3.create();
-        this.sliceDir = vec3.create();
-        this.slicePlaneNormal = vec3.create();
-        this.slicePlanePoint = vec3.create();
+        
+        // Cache to avoid searching every frame
+        this.sliceableFruits = [];
         
         // Get initial position
         this.object.getPositionWorld(this.lastPos);
         
-        // Track if we're currently in a slice motion
-        this.isSlicing = false;
+        // Refresh fruit cache periodically
+        this.cacheRefreshTimer = 0;
+        this.cacheRefreshInterval = 0.1; // Reduced to 0.1 seconds for better responsiveness
+        
+        // Try to attach to VR hand if specified
+        this.handObject = null;
+        if (this.handTracking !== 'none') {
+            this.attachToHand();
+        }
+    }
+
+    start() {
+        // Update cache after scene is fully loaded
+        this.updateFruitCache();
+    }
+
+    /**
+     * Attach sword to VR controller hand
+     */
+    attachToHand() {
+        // Find the hand object in the scene
+        const handName = this.handTracking === 'left' ? 'LeftHand' : 'RightHand';
+        const hand = this.engine.scene.findByName(handName)[0];
+        
+        if (hand) {
+            this.handObject = hand;
+            // Parent the sword to the hand
+            this.object.parent = hand;
+            if (this.showDebug) {
+                console.log(`Sword attached to ${handName}`);
+            }
+        } else {
+            console.warn(`Could not find ${handName} in scene. Make sure VR hands are set up.`);
+        }
     }
 
     update(dt) {
@@ -50,135 +77,105 @@ export class VRSword extends Component {
         vec3.subtract(this.velocity, this.currentPos, this.lastPos);
         const speed = vec3.length(this.velocity) / dt;
         
-        // Add to position history
-        this.positions.push(vec3.clone(this.currentPos));
-        if (this.positions.length > this.trailLength) {
-            this.positions.shift();
+        // Periodically refresh the fruit cache
+        this.cacheRefreshTimer += dt;
+        if (this.cacheRefreshTimer >= this.cacheRefreshInterval) {
+            this.updateFruitCache();
+            this.cacheRefreshTimer = 0;
         }
         
-        // Check if moving fast enough to slice
-        if (speed > this.minSliceSpeed && this.positions.length >= 2) {
-            if (!this.isSlicing) {
-                this.isSlicing = true;
-            }
-            this.performSliceCheck();
-        } else {
-            this.isSlicing = false;
+        // Check for hits
+        const shouldCheck = this.alwaysCheckHits || speed > this.minHitSpeed;
+        if (shouldCheck) {
+            this.checkForHits();
         }
         
-        // Update visual blade trail if exists
-        if (this.bladeTrail && this.isSlicing) {
-            this.updateBladeTrail();
+        // Debug speed display
+        if (this.showDebug && speed > 0.1) {
+            console.log(`Sword speed: ${speed.toFixed(2)}`);
         }
         
         // Store position for next frame
         vec3.copy(this.lastPos, this.currentPos);
     }
 
-    performSliceCheck() {
-        // Create slice plane from recent positions
-        const start = this.positions[0];
-        const end = this.positions[this.positions.length - 1];
+    updateFruitCache() {
+        // Clear old cache
+        this.sliceableFruits = [];
         
-        // Calculate slice direction
-        vec3.subtract(this.sliceDir, end, start);
-        vec3.normalize(this.sliceDir, this.sliceDir);
+        // Find all active fruits
+        this.collectActiveFruits(this.engine.scene.children);
         
-        // Create perpendicular normal for the slice plane
-        // Use cross product with up vector
-        const up = vec3.fromValues(0, 1, 0);
-        vec3.cross(this.slicePlaneNormal, this.sliceDir, up);
-        
-        // If nearly vertical, use forward instead
-        if (vec3.length(this.slicePlaneNormal) < 0.1) {
-            const forward = vec3.fromValues(0, 0, 1);
-            vec3.cross(this.slicePlaneNormal, this.sliceDir, forward);
+        if (this.showDebug) {
+            console.log(`Found ${this.sliceableFruits.length} fruits`);
         }
-        
-        vec3.normalize(this.slicePlaneNormal, this.slicePlaneNormal);
-        
-        // Plane point is the middle of the slice motion
-        vec3.lerp(this.slicePlanePoint, start, end, 0.5);
-        
-        // Find all Sliceable objects in the scene
-        const sliceables = this.findSliceableObjects();
-        
-        // Check each sliceable for intersection
-        for (let sliceable of sliceables) {
-            const objPos = vec3.create();
-            sliceable.object.getPositionWorld(objPos);
-            
-            // Check if object is near the slice line
-            if (this.isNearSliceLine(objPos, start, end)) {
-                // Check if object intersects the slice plane
-                const distToPlane = this.pointToPlaneDistance(objPos, this.slicePlanePoint, this.slicePlaneNormal);
+    }
+
+    collectActiveFruits(objects) {
+        for (let obj of objects) {
+            // Check if object is active and has the sliceable-fruit component
+            if (obj.active) {
+                const sliceable = obj.getComponent('sliceable-fruit');
+                if (sliceable && !sliceable.isDestroyed) {
+                    this.sliceableFruits.push({
+                        object: obj,
+                        component: sliceable
+                    });
+                }
                 
-                if (Math.abs(distToPlane) < this.sliceRadius) {
-                    // Trigger the slice on the sliceable object
-                    sliceable.onSliced(this.slicePlaneNormal, this.slicePlanePoint, this.sliceDir);
+                // Recursively check children
+                if (obj.children && obj.children.length > 0) {
+                    this.collectActiveFruits(obj.children);
                 }
             }
         }
     }
 
-    findSliceableObjects() {
-        // Find all objects with Sliceable component
-        const allObjects = this.engine.scene.children;
-        const sliceables = [];
+    checkForHits() {
+        const tempPos = vec3.create();
         
-        this.collectSliceables(allObjects, sliceables);
-        
-        return sliceables;
-    }
-
-    collectSliceables(objects, result) {
-        for (let obj of objects) {
-            const sliceable = obj.getComponent('sliceable');
-            if (sliceable && !sliceable.isSliced) {
-                result.push(sliceable);
+        // Check each fruit in cache
+        for (let i = this.sliceableFruits.length - 1; i >= 0; i--) {
+            const fruit = this.sliceableFruits[i];
+            
+            // Skip if already destroyed or inactive
+            if (!fruit.object || !fruit.object.active || fruit.component.isDestroyed) {
+                // Remove from cache
+                this.sliceableFruits.splice(i, 1);
+                continue;
             }
-            // Recursively check children
-            if (obj.children.length > 0) {
-                this.collectSliceables(obj.children, result);
+            
+            // Get fruit position
+            fruit.object.getPositionWorld(tempPos);
+            
+            // Calculate distance
+            const distance = vec3.distance(this.currentPos, tempPos);
+            
+            // Check if within hit radius
+            if (distance <= this.hitRadius) {
+                // Trigger hit
+                this.hitFruit(fruit);
+                
+                // Remove from cache
+                this.sliceableFruits.splice(i, 1);
             }
         }
     }
 
-    isNearSliceLine(point, lineStart, lineEnd) {
-        // Calculate distance from point to line segment
-        const lineVec = vec3.create();
-        vec3.subtract(lineVec, lineEnd, lineStart);
+    hitFruit(fruit) {
+        // Mark as destroyed
+        fruit.component.isDestroyed = true;
         
-        const pointVec = vec3.create();
-        vec3.subtract(pointVec, point, lineStart);
+        // Call the fruit's onHit method if it exists
+        if (typeof fruit.component.onHit === 'function') {
+            fruit.component.onHit(this.currentPos, this.velocity);
+        } else {
+            // Simple destruction fallback
+            fruit.object.destroy();
+        }
         
-        const lineLengthSq = vec3.dot(lineVec, lineVec);
-        if (lineLengthSq === 0) return false;
-        
-        const t = Math.max(0, Math.min(1, vec3.dot(pointVec, lineVec) / lineLengthSq));
-        
-        const closest = vec3.create();
-        vec3.scaleAndAdd(closest, lineStart, lineVec, t);
-        
-        const distance = vec3.distance(point, closest);
-        return distance < this.sliceRadius;
-    }
-
-    pointToPlaneDistance(point, planePoint, planeNormal) {
-        const toPoint = vec3.create();
-        vec3.subtract(toPoint, point, planePoint);
-        return vec3.dot(toPoint, planeNormal);
-    }
-
-    updateBladeTrail() {
-        // Simple trail positioning
-        if (this.positions.length >= 2) {
-            const mid = vec3.create();
-            vec3.lerp(mid, this.positions[0], this.positions[this.positions.length - 1], 0.5);
-            this.bladeTrail.setPositionWorld(mid);
-            
-            // Optional: rotate trail to align with motion
-            // You could calculate a quaternion here to orient the trail mesh
+        if (this.showDebug) {
+            console.log('Fruit hit!');
         }
     }
 }
